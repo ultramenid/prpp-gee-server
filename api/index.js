@@ -52,27 +52,32 @@ app.get('/radd', async (_, response) => {
   var startDate = 24000;
   var endDate   = 24365;
 
-  var geometry  = ee.FeatureCollection("users/adhityadhyaksa/PPRP_Boundary");
-  var radd_alert = ee.ImageCollection('projects/radar-wur/raddalert/v1')
-                    .filterMetadata('geography','equals','asia')
-                    .filterMetadata('layer','contains','alert')
-                    .map(function (i){
-                      var date = i.select('Date').gte(startDate).and(i.select('Date').lte(endDate));
-                      return i.updateMask(date).clip(geometry).selfMask();
-                    }).filterBounds(geometry);
-  var alert_image = radd_alert.mosaic()
+  try {
+    var geometry  = ee.FeatureCollection("users/adhityadhyaksa/PPRP_Boundary");
+    var radd_alert = ee.ImageCollection('projects/radar-wur/raddalert/v1')
+                        .filterMetadata('geography','equals','asia')
+                        .filterMetadata('layer','contains','alert')
+                        .map(function (i){
+                        var date = i.select('Date').gte(startDate).and(i.select('Date').lte(endDate));
+                        return i.updateMask(date).clip(geometry).selfMask();
+                        }).filterBounds(geometry);
+    var alert_image = radd_alert.mosaic()
 
 
-  var AlertParam = {'opacity':1,
-                    'bands':['Alert'],
-                    'min':2,
-                    'max':3,
-                    'palette':['00c5ff','ff1313'],
-                    'format':'PNG'
-  };
-  const res = alert_image.getMap(AlertParam);
-  // console.log(res.urlFormat)
-  response.send(res.urlFormat);
+    var AlertParam = {'opacity':1,
+                        'bands':['Alert'],
+                        'min':2,
+                        'max':3,
+                        'palette':['00c5ff','ff1313'],
+                        'format':'PNG'
+    };
+    const res = alert_image.getMap(AlertParam);
+    // console.log(res.urlFormat)
+    response.send(res.urlFormat);
+  } catch (error) {
+    console.error(error)
+  }
+  
 
 })
 
