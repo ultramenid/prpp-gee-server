@@ -1,15 +1,4 @@
-/**
- * @license
- * Copyright 2020 Google LLC
- * SPDX-License-Identifier: Apache-2.0
- */
 
-/**
- * @fileoverview Default entry point for App Engine Node.js runtime. Defines a
- * web service which returns the mapid to be used by clients to display map
- * tiles showing slope computed in real time from SRTM DEM data. See
- * accompanying README file for instructions on how to set up authentication.
- */
 require("dotenv").config({ path: ".env" })
 const ee = require('@google/earthengine');
 const express = require('express');
@@ -48,38 +37,29 @@ app.get('/mapid',async (_, response) => {
   response.send(res.urlFormat);
 });
 
-app.get('/radd', async (_, response) => {
-  var startDate = 24000;
-  var endDate   = 24365;
 
+
+
+app.get("/gee/lulc", async (req, res) => {
   try {
-    var geometry  = ee.FeatureCollection("users/adhityadhyaksa/PPRP_Boundary");
-    var radd_alert = ee.ImageCollection('projects/radar-wur/raddalert/v1')
-                        .filterMetadata('geography','equals','asia')
-                        .filterMetadata('layer','contains','alert')
-                        .map(function (i){
-                        var date = i.select('Date').gte(startDate).and(i.select('Date').lte(endDate));
-                        return i.updateMask(date).clip(geometry).selfMask();
-                        }).filterBounds(geometry);
-    var alert_image = radd_alert.mosaic()
+    const { kab, kec, des } = req.query;
 
+    let geometry = ee.FeatureCollection("projects/ee-dataaurigagee/assets/LTKL/desa");
 
-    var AlertParam = {'opacity':1,
-                        'bands':['Alert'],
-                        'min':2,
-                        'max':3,
-                        'palette':['00c5ff','ff1313'],
-                        'format':'PNG'
-    };
-    const res = alert_image.getMap(AlertParam);
-    // console.log(res.urlFormat)
-    response.send(res.urlFormat);
-  } catch (error) {
-    console.error(error)
+    if (kab) geometry = geometry.filter(ee.Filter.eq("kab", kab));
+    if (kec) geometry = geometry.filter(ee.Filter.eq("kec", kec));
+    if (des) geometry = geometry.filter(ee.Filter.eq("des", des));
+
+    const MBI4_1 = ee.Image("projects/ee-dataaurigagee/assets/LTKL/LTKL_mbi41_colored");
+    const LULCyear = MBI4_1.clip(geometry);
+
+    const mapInfo = await LULCyear.getMap();
+    res.send(mapInfo.urlFormat);
+  } catch (err) {
+    console.error("❌ Error creating map:", err);
+    res.status(500).send("Error generating map");
   }
-  
-
-})
+});
 
 
 
