@@ -44,11 +44,11 @@ app.get("/gee/lulc", async (req, res) => {
   try {
     const { kab, kec, des } = req.query;
 
-    let geometry = ee.FeatureCollection("projects/ee-dataaurigagee/assets/LTKL/desa");
+    let geometry;
 
-    if (kab) geometry = geometry.filter(ee.Filter.eq("kab", kab));
-    if (kec) geometry = geometry.filter(ee.Filter.eq("kec", kec));
-    if (des) geometry = geometry.filter(ee.Filter.eq("des", des));
+    if (kab) geometry = ee.FeatureCollection("projects/ee-dataaurigagee/assets/LTKL/kabupaten").filter(ee.Filter.eq("kab", kab));
+    if (kec) geometry = ee.FeatureCollection("projects/ee-dataaurigagee/assets/LTKL/kecamatan").filter(ee.Filter.eq("kec", kec));
+    if (des) geometry = ee.FeatureCollection("projects/ee-dataaurigagee/assets/LTKL/desa").filter(ee.Filter.eq("des", des));
 
     const MBI4_1 = ee.Image("projects/ee-dataaurigagee/assets/LTKL/LTKL_mbi41_colored");
     const LULCyear = MBI4_1.clip(geometry);
