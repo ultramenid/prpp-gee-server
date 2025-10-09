@@ -42,47 +42,23 @@ app.get('/mapid',async (_, response) => {
 
 app.get("/gee/lulc", async (req, res) => {
   try {
-  const { kab, kec, des } = req.query;
+    const { kab, kec, des } = req.query;
 
-  let geometry;
-  let asset;
+    let geometry = ee.FeatureCollection("projects/ee-dataaurigagee/assets/LTKL/desa");
 
-  // Decide which asset to use
-  if (des) {
-    asset = "projects/ee-dataaurigagee/assets/LTKL/desa";
-  } else if (kec) {
-    asset = "projects/ee-dataaurigagee/assets/LTKL/kecamatan";
-  } else {
-    asset = "projects/ee-dataaurigagee/assets/LTKL/kabupaten";
+    if (kab) geometry = geometry.filter(ee.Filter.eq("kab", kab));
+    if (kec) geometry = geometry.filter(ee.Filter.eq("kec", kec));
+    if (des) geometry = geometry.filter(ee.Filter.eq("des", des));
+
+    const MBI4_1 = ee.Image("projects/ee-dataaurigagee/assets/LTKL/LTKL_mbi41_colored");
+    const LULCyear = MBI4_1.clip(geometry);
+
+    const mapInfo = await LULCyear.getMap();
+    res.send(mapInfo.urlFormat);
+  } catch (err) {
+    console.error("❌ Error creating map:", err);
+    res.status(500).send("Error generating map");
   }
-
-  geometry = ee.FeatureCollection(asset);
-
-  // Apply filters safely
-  if (kab) geometry = geometry.filter(ee.Filter.eq("kab", kab));
-  if (kec) geometry = geometry.filter(ee.Filter.eq("kec", kec));
-  if (des) geometry = geometry.filter(ee.Filter.eq("des", des));
-
-  // Check if geometry is empty
-  const count = await geometry.size().getInfo();
-  if (count === 0) {
-    return res.status(404).send("No features found for the given query");
-  }
-
-  // Load LULC image and clip
-  const MBI4_1 = ee.Image("projects/ee-dataaurigagee/assets/LTKL/LTKL_mbi41_colored");
-  const LULCyear = MBI4_1.clip(geometry);
-
-  // Generate map tiles
-  const mapInfo = await LULCyear.getMap();
-  res.send(mapInfo.urlFormat);
-
-} catch (err) {
-  console.error("❌ Error creating map:", err);
-  res.status(500).send("Error generating map");
-}
-
-
 });
 
 
