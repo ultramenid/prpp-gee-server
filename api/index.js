@@ -42,7 +42,8 @@ app.get('/mapid',async (_, response) => {
 
 app.get("/gee/lulc", async (req, res) => {
   try {
-    const { kab, kec, des } = req.query;
+    const { kab, kec, des, year = 1992 } = req.query;
+    const yearInt = parseInt(year, 10);
 
     let geometry = ee.FeatureCollection("projects/ee-dataaurigagee/assets/LTKL/desa");
 
@@ -50,8 +51,8 @@ app.get("/gee/lulc", async (req, res) => {
     if (kec) geometry = geometry.filter(ee.Filter.eq("kec", kec));
     if (des) geometry = geometry.filter(ee.Filter.eq("des", des));
 
-    const MBI4_1 = ee.Image("projects/ee-dataaurigagee/assets/LTKL/LTKL_mbi41_colored");
-    const LULCyear = MBI4_1.clip(geometry);
+    const MBI4_1 = `projects/ee-dataaurigagee/assets/LTKL/LTKLcollection/LTKL_mbi41_${yearInt}`;
+    const LULCyear = ee.Image(MBI4_1).clip(geometry);
 
     const mapInfo = await LULCyear.getMap();
     res.send(mapInfo.urlFormat);
