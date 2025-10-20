@@ -51,7 +51,7 @@ app.get("/gee/lulc", async (req, res) => {
     if (kec) geometry = geometry.filter(ee.Filter.eq("kec", kec));
     if (des) geometry = geometry.filter(ee.Filter.eq("des", des));
 
-    const MBI4_1 = `projects/ee-dataaurigagee/assets/LTKL/LTKLcollection/LTKL_mbi41_${yearInt}`;
+    const MBI4_1 = `projects/ee-dataaurigagee/assets/LTKL/LTKLcollection2/LTKL_mbi41_${yearInt}`;
     const LULCyear = ee.Image(MBI4_1).clip(geometry);
 
     const mapInfo = await LULCyear.getMap();
