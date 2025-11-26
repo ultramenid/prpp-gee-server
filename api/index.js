@@ -63,6 +63,90 @@ app.get("/gee/lulc", async (req, res) => {
 });
 
 
+// /gee/lulc-stats (no evaluateAsync helper, single evaluation per year)
+app.get('/gee/lulc-stats', async (req, res) => {
+  try {
+    var originalClass   = [3,5,76];
+    var remapClass      = [3,3,3];
+    var yearList        = [2024];
+    var LTKLkabList     = [
+      'Gorontalo','Siak','Musi Banyuasin','Kapuas Hulu','Bone Bolango',
+      'Sintang','Sanggau','Aceh Tamiang','Sigi'
+    ];
+
+    var MBI41 = ee.Image('projects/mapbiomas-public/assets/indonesia/lulc/collection4/mapbiomas_indonesia_collection4_coverage_v2');
+    var LTKLkab = ee.FeatureCollection('projects/ee-dataaurigagee/assets/LTKL/kecamatan');
+
+    var resultByYear = ee.Dictionary({});
+
+    for (var yearId in yearList) {
+
+      var year = yearList[yearId];
+      var allAreas = ee.Dictionary({});
+
+      for (var kabId in LTKLkabList) {
+        
+        var kabupaten = LTKLkabList[kabId];
+        var kab_aoi   = LTKLkab.filterMetadata('kab', 'equals', kabupaten);
+
+        var MBIyear = MBI41
+          .select('classification_' + year)
+          .clip(kab_aoi)
+          .remap(originalClass, remapClass)
+          .rename(kabupaten);
+
+        var areaScope = ee.Image.pixelArea().divide(1E4);
+
+        var areaHectare = areaScope.addBands(MBIyear).reduceRegion({
+          reducer: ee.Reducer.sum().group({ groupField: 1 }),
+          geometry: kab_aoi.bounds(),
+          scale: 30,
+          maxPixels: 1E13
+        });
+
+        var statsFormatted = ee.List(areaHectare.get('groups'))
+          .map(function(i) {
+            var d = ee.Dictionary(i);
+            return [
+              ee.Number(d.get('group')).format("%02d"),
+              ee.Number(d.get('sum')).format('%.0f')
+            ];
+          });
+
+        var statsDictionary = ee.Dictionary(statsFormatted.flatten());
+
+        var areaValue = ee.Number(statsDictionary.get('03'));
+        allAreas = allAreas.set(kabupaten, areaValue);
+      }
+
+      var fc = ee.FeatureCollection(
+        allAreas.keys().map(function(k) {
+          return ee.Feature(null, {
+            kab: k,
+            area: ee.Number(allAreas.get(k))
+          });
+        })
+      );
+
+      var sorted = fc.sort('area', false);
+
+      var sortedList = sorted.aggregate_array('kab')
+        .zip(sorted.aggregate_array('area'));
+
+  resultByYear = resultByYear.set(String(year), sortedList);
+}
+
+    
+    return res.json(resultByYear.getInfo());
+
+  } catch (err) {
+    console.error("Error /gee/lulc-stats:", err);
+    return res.status(500).json({ error: "Failed computing stats", details: err && err.message ? err.message : err });
+  }
+});
+
+
+
 
 console.log('Authenticating Earth Engine API using private key...');
 ee.data.authenticateViaPrivateKey(
