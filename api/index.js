@@ -63,14 +63,25 @@ app.get("/gee/lulc", async (req, res) => {
 });
 
 
+// /gee/lulc-stats (no evaluateAsync helper, single evaluation per year)
 app.get('/gee/lulc-stats', async (req, res) => {
   try {
-    // 1 YEAR ONLY — default = 2024
-    const year = req.query.year ? parseInt(req.query.year, 10) : 2024;
+    const yearParam = req.query.year;
+    let yearList = [];
+
+    if (yearParam) {
+      // allow comma-separated years: ?year=2020,2021
+      yearList = String(yearParam)
+        .split(',')
+        .map((v) => parseInt(v.trim(), 10))
+        .filter((n) => !isNaN(n));
+    }
+
+    if (yearList.length === 0) yearList = [2024]; // default
 
     var originalClass   = [3,5,76];
     var remapClass      = [3,3,3];
-
+    // var yearList        = [2024];
     var LTKLkabList     = [
       'Gorontalo','Siak','Musi Banyuasin','Kapuas Hulu','Bone Bolango',
       'Sintang','Sanggau','Aceh Tamiang','Sigi'
@@ -79,75 +90,72 @@ app.get('/gee/lulc-stats', async (req, res) => {
     var MBI41 = ee.Image('projects/mapbiomas-public/assets/indonesia/lulc/collection4/mapbiomas_indonesia_collection4_coverage_v2');
     var LTKLkab = ee.FeatureCollection('projects/ee-dataaurigagee/assets/LTKL/kecamatan');
 
-    var allAreas = ee.Dictionary({});
+    var resultByYear = ee.Dictionary({});
 
-    // LOOP KABUPATEN
-    for (var kabId in LTKLkabList) {
-      var kabupaten = LTKLkabList[kabId];
-      var kab_aoi   = LTKLkab.filterMetadata('kab', 'equals', kabupaten);
+    for (var yearId in yearList) {
 
-      var MBIyear = MBI41
-        .select('classification_' + year)
-        .clip(kab_aoi)
-        .remap(originalClass, remapClass)
-        .rename(kabupaten);
+      var year = yearList[yearId];
+      var allAreas = ee.Dictionary({});
 
-      var areaScope = ee.Image.pixelArea().divide(1E4);
+      for (var kabId in LTKLkabList) {
+        
+        var kabupaten = LTKLkabList[kabId];
+        var kab_aoi   = LTKLkab.filterMetadata('kab', 'equals', kabupaten);
 
-      var areaHectare = areaScope.addBands(MBIyear).reduceRegion({
-        reducer: ee.Reducer.sum().group({ groupField: 1 }),
-        geometry: kab_aoi.bounds(),
-        scale: 30,
-        maxPixels: 1E13
-      });
+        var MBIyear = MBI41
+          .select('classification_' + year)
+          .clip(kab_aoi)
+          .remap(originalClass, remapClass)
+          .rename(kabupaten);
 
-      var statsFormatted = ee.List(areaHectare.get('groups'))
-        .map(function(i) {
-          var d = ee.Dictionary(i);
-          return [
-            ee.Number(d.get('group')).format("%02d"),
-            ee.Number(d.get('sum')).format('%.0f')
-          ];
+        var areaScope = ee.Image.pixelArea().divide(1E4);
+
+        var areaHectare = areaScope.addBands(MBIyear).reduceRegion({
+          reducer: ee.Reducer.sum().group({ groupField: 1 }),
+          geometry: kab_aoi.bounds(),
+          scale: 30,
+          maxPixels: 1E13
         });
 
-      var statsDictionary = ee.Dictionary(statsFormatted.flatten());
+        var statsFormatted = ee.List(areaHectare.get('groups'))
+          .map(function(i) {
+            var d = ee.Dictionary(i);
+            return [
+              ee.Number(d.get('group')).format("%02d"),
+              ee.Number(d.get('sum')).format('%.0f')
+            ];
+          });
 
-      var areaValue = ee.Number(statsDictionary.get('03'));
-      allAreas = allAreas.set(kabupaten, areaValue);
-    }
+        var statsDictionary = ee.Dictionary(statsFormatted.flatten());
 
-    var fc = ee.FeatureCollection(
-      allAreas.keys().map(function(k) {
-        return ee.Feature(null, {
-          kab: k,
-          area: ee.Number(allAreas.get(k))
-        });
-      })
-    );
+        var areaValue = ee.Number(statsDictionary.get('03'));
+        allAreas = allAreas.set(kabupaten, areaValue);
+      }
 
-    var sorted = fc.sort('area', false);
+      var fc = ee.FeatureCollection(
+        allAreas.keys().map(function(k) {
+          return ee.Feature(null, {
+            kab: k,
+            area: ee.Number(allAreas.get(k))
+          });
+        })
+      );
 
-    var sortedList = sorted.aggregate_array('kab')
-      .zip(sorted.aggregate_array('area'));
+      var sorted = fc.sort('area', false);
 
-    // ---- Evaluate result ----
-    const finalData = await new Promise((resolve, reject) => {
-      sortedList.getInfo((info, err) => {
-        if (err) return reject(err);
-        resolve(info);
-      });
-    });
+      var sortedList = sorted.aggregate_array('kab')
+        .zip(sorted.aggregate_array('area'));
 
-    return res.json({
-      year,
-      data: finalData
-    });
+  resultByYear = resultByYear.set(String(year), sortedList);
+}
+
+    
+    return res.json(resultByYear.getInfo());
 
   } catch (err) {
     console.error("Error /gee/lulc-stats:", err);
-    return res.status(500).json({ error: "Failed computing stats", details: err?.message || err });
+    return res.status(500).json({ error: "Failed computing stats", details: err && err.message ? err.message : err });
   }
-    
 });
 
 
