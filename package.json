@@ -4,9 +4,12 @@
   "main": "index.js",
   "scripts": {
     "start": "node api/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon api/index.js"
-
+    "dev": "nodemon api/index.js",
+    "prod": "pm2 start ecosystem.config.js --env production",
+    "prod:stop": "pm2 stop prpp-gee-server",
+    "prod:restart": "pm2 restart prpp-gee-server",
+    "prod:logs": "pm2 logs prpp-gee-server",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
@@ -22,5 +25,11 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
+  },
+  "nodemonConfig": {
+    "watch": ["api/"],
+    "ext": "js,json",
+    "delay": 500,
+    "ignore": ["node_modules/", ".env"]
   }
 }
