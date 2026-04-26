@@ -116,7 +116,7 @@ router.get("/lulc-stats", async (req, res) => {
     return res.json(result);
   } catch (err) {
     console.error("Error in /gee/lulc-stats:", err);
-    return res.status(500).json({ error: "Failed computing stats", details: err?.message ?? err });
+    return res.status(500).json({ error: "Failed computing stats", details: err && err.message ? err.message : err });
   }
 });
 
