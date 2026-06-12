@@ -130,14 +130,15 @@ router.get("/stack-chart", async (req, res, next) => {
     const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
     const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
-    // Determine drill-down level and sub-regions to process
+    // Determine drill-down level and sub-regions to process.
+    // When a specific admin level is selected we aggregate into a SINGLE row
+    // (frontend renders as pie chart). When no selection we return one row
+    // per kabupaten (frontend renders as stacked bar).
     let level = "kabupaten";
-    let nameKey = "kabupaten";
     let regions = [];
 
     if (des) {
       level = "desa";
-      nameKey = "des";
       regions = [{
         name: des,
         collection: desCollection
@@ -147,39 +148,20 @@ router.get("/stack-chart", async (req, res, next) => {
       }];
     } else if (kec) {
       level = "kecamatan";
-      nameKey = "des";
-      const desaList = await new Promise((resolve, reject) =>
-        desCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec))
-          .aggregate_array("des")
-          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
-      );
-      regions = (desaList || []).map((desaName) => ({
-        name: desaName,
+      regions = [{
+        name: kec,
         collection: desCollection
           .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec))
-          .filter(ee.Filter.eq("des", desaName)),
-      }));
+          .filter(ee.Filter.eq("kec", kec)),
+      }];
     } else if (kab) {
       level = "kabupaten";
-      nameKey = "kec";
-      const kecList = await new Promise((resolve, reject) =>
-        kecCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .aggregate_array("kec")
-          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
-      );
-      regions = (kecList || []).map((kecName) => ({
-        name: kecName,
-        collection: kecCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kecName)),
-      }));
+      regions = [{
+        name: kab,
+        collection: kecCollection.filter(ee.Filter.eq("kab", kab)),
+      }];
     } else {
       level = "kabupaten";
-      nameKey = "kabupaten";
       regions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
         name: kabupatenName,
         collection: kecCollection.filter(ee.Filter.eq("kab", kabupatenName)),
