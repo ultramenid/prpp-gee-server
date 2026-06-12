@@ -1,16 +1,19 @@
 const express = require("express");
-const ee = require("@google/earthengine");
-const { ASSETS, LTKL_KABUPATEN_LIST, LULC_ORIGINAL_CLASSES, LULC_REMAPPED_CLASSES } = require("../config/assets");
+const { ee } = require("../services/earthEngine");
+const {
+  ASSETS,
+  LTKL_KABUPATEN_LIST,
+  LULC_ORIGINAL_CLASSES,
+  LULC_REMAPPED_CLASSES,
+} = require("../config/assets");
+const { parseSingleYear, parseYearList } = require("../utils/yearValidation");
 
 const router = express.Router();
 
-// GET /gee/lulc — LULC map tile URL for a given year and optional region filters
-// kab = kabupaten (regency), kec = kecamatan (district), des = desa (village)
-router.get("/lulc", async (req, res) => {
+router.get("/lulc", async (req, res, next) => {
   try {
-    const { kab, kec, des, year = 1992 } = req.query;
-    const selectedYear = parseInt(year, 10);
-    if (isNaN(selectedYear)) return res.status(400).send("year must be a valid number");
+    const { kab, kec, des } = req.query;
+    const selectedYear = parseSingleYear(req.query.year, 1992);
 
     let regionCollection = ee.FeatureCollection(ASSETS.desaCollection);
     if (kab) regionCollection = regionCollection.filter(ee.Filter.eq("kab", kab));
@@ -22,28 +25,13 @@ router.get("/lulc", async (req, res) => {
     const mapInfo = await lulcImage.getMap();
     res.send(mapInfo.urlFormat);
   } catch (err) {
-    console.error("Error in /gee/lulc:", err);
-    res.status(500).send("Internal server error");
+    next(err);
   }
 });
 
-// GET /gee/lulc-stats — LULC area stats (hectares) per kabupaten, sorted by area descending
-// Accepts ?year=2020 or comma-separated ?year=2020,2021
-router.get("/lulc-stats", async (req, res) => {
+router.get("/lulc-stats", async (req, res, next) => {
   try {
-    const yearParam = req.query.year;
-    let yearList = [];
-
-    if (yearParam) {
-      // Allow comma-separated years: ?year=2020,2021
-      yearList = String(yearParam)
-        .split(",")
-        .map((v) => parseInt(v.trim(), 10))
-        .filter((n) => !isNaN(n));
-    }
-
-    if (yearList.length === 0) yearList = [2024]; // default year
-
+    const yearList = parseYearList(req.query.year, [2024]);
     const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesia);
     const kabCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
 
@@ -53,28 +41,23 @@ router.get("/lulc-stats", async (req, res) => {
       let allAreas = ee.Dictionary({});
 
       for (const kabupaten of LTKL_KABUPATEN_LIST) {
-        // Filter to the target kabupaten boundary
         const kabRegion = kabCollection.filter(ee.Filter.eq("kab", kabupaten));
 
-        // Select the classification band for this year, remap to target classes
         const classifiedImage = mapbiomasImage
           .select("classification_" + year)
           .clip(kabRegion)
           .remap(LULC_ORIGINAL_CLASSES, LULC_REMAPPED_CLASSES)
           .rename(kabupaten);
 
-        // Pixel area image in hectares
         const pixelAreaHectares = ee.Image.pixelArea().divide(1e4);
 
-        // Compute area per class within the kabupaten bounds
         const areaByClass = pixelAreaHectares.addBands(classifiedImage).reduceRegion({
           reducer: ee.Reducer.sum().group({ groupField: 1 }),
-          geometry: kabRegion.bounds(),
+          geometry: kabRegion.geometry(),
           scale: 30,
           maxPixels: 1e13,
         });
 
-        // Reshape groups array into a flat { classCode: area } dictionary
         const statsFormatted = ee.List(areaByClass.get("groups")).map(function (item) {
           const entry = ee.Dictionary(item);
           return [
@@ -84,13 +67,10 @@ router.get("/lulc-stats", async (req, res) => {
         });
 
         const statsDictionary = ee.Dictionary(statsFormatted.flatten());
-
-        // Class "03" corresponds to the remapped forest class
-        const forestAreaHectares = ee.Number(statsDictionary.get("03"));
+        const forestAreaHectares = ee.Number(statsDictionary.get("03", 0));
         allAreas = allAreas.set(kabupaten, forestAreaHectares);
       }
 
-      // Build a FeatureCollection to sort kabupaten by area descending
       const kabFeatures = ee.FeatureCollection(
         allAreas.keys().map(function (key) {
           return ee.Feature(null, {
@@ -108,15 +88,13 @@ router.get("/lulc-stats", async (req, res) => {
       resultByYear = resultByYear.set(String(year), sortedList);
     }
 
-    // Evaluate the full GEE computation graph once, asynchronously (non-blocking)
     const result = await new Promise((resolve, reject) =>
       resultByYear.evaluate((value, err) => (err ? reject(err) : resolve(value)))
     );
 
-    return res.json(result);
+    res.json(result);
   } catch (err) {
-    console.error("Error in /gee/lulc-stats:", err);
-    return res.status(500).json({ error: "Failed computing stats", details: err && err.message ? err.message : err });
+    next(err);
   }
 });
 

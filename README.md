@@ -8,10 +8,15 @@ Node.js + Express API server integrating Google Earth Engine (GEE) for geospatia
 
 ```
 api/
-  index.js              ← Entry point: GEE auth + server start
-  app.js                ← Express setup + route mounting
+  index.js              ← PM2/local entry point: GEE auth + server start
+  app.js                ← Express setup, middleware, routes, health, errors
   config/
     assets.js           ← GEE asset paths & domain constants
+  services/
+    earthEngine.js      ← GEE auth/init service
+  utils/
+    httpErrors.js       ← HTTP error helpers
+    yearValidation.js   ← Year query parsing and validation
   routes/
     mapid.js            ← GET /mapid
     lulc.js             ← GET /gee/lulc, GET /gee/lulc-stats
@@ -39,6 +44,8 @@ CLIENT_EMAIL=your-service-account@your-project.iam.gserviceaccount.com
 CLIENT_ID=your-client-id
 CLIENT_X509_CERT_URL=https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com
 PORT=8000
+# Optional: restrict browser access to one origin. Leave unset to allow all origins.
+CORS_ORIGIN=https://your-frontend.example.com
 ```
 
 ---
@@ -104,6 +111,15 @@ npm run prod:restart
 
 ## API Endpoints
 
+### GET /health
+
+Returns basic service status.
+
+**Response:**
+{ "status": "ok" }
+
+---
+
 ### `GET /mapid`
 
 Returns a Sentinel-2 true-color mosaic tile URL (cloud-filtered, 2019–2020).
@@ -129,6 +145,8 @@ Returns a LULC map tile URL for a given year and optional region.
 GET /gee/lulc?year=2020&kab=Siak
 ```
 
+`year` must be an integer. The API does not enforce a fixed year range because new Earth Engine assets may be added over time.
+
 ---
 
 ### `GET /gee/lulc-stats`
@@ -145,3 +163,5 @@ Returns forest area statistics (hectares) per kabupaten, sorted by area descendi
 GET /gee/lulc-stats?year=2024
 GET /gee/lulc-stats?year=2020,2021,2024
 ```
+
+`year` must be one integer or comma-separated integers. The API does not enforce a fixed year range because new MapBiomas bands may be added over time.

@@ -1,1 +1,6 @@
 node_modules/
+.claude/
+.github/
+.env
+.DS_Store
+docs/

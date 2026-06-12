@@ -1,10 +1,9 @@
 const express = require("express");
-const ee = require("@google/earthengine");
+const { ee } = require("../services/earthEngine");
 
 const router = express.Router();
 
-// GET /mapid — Sentinel-2 true-color mosaic tile URL (cloud-filtered, 2019–2020)
-router.get("/", async (req, res) => {
+router.get("/", async (req, res, next) => {
   try {
     const vis = { bands: ["B4", "B3", "B2"], min: 0, max: 2000 };
     const mosaic = ee
@@ -16,8 +15,7 @@ router.get("/", async (req, res) => {
     const mapInfo = await mosaic.getMap(vis);
     res.send(mapInfo.urlFormat);
   } catch (err) {
-    console.error("Error in /mapid:", err);
-    res.status(500).send("Internal server error");
+    next(err);
   }
 });
 
