@@ -131,9 +131,10 @@ router.get("/stack-chart", async (req, res, next) => {
     const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
     // Determine drill-down level and sub-regions to process.
-    // When a specific admin level is selected we aggregate into a SINGLE row
-    // (frontend renders as pie chart). When no selection we return one row
-    // per kabupaten (frontend renders as stacked bar).
+    //   (none)                 -> one row per kabupaten     (stacked bar)
+    //   ?kab=<name>            -> one row per kecamatan    (stacked bar)
+    //   ?kab=<name>&kec=<name> -> one row per desa         (stacked bar)
+    //   ?kab=<name>&kec=<name>&des=<name> -> single row    (pie chart)
     let level = "kabupaten";
     let regions = [];
 
@@ -148,18 +149,34 @@ router.get("/stack-chart", async (req, res, next) => {
       }];
     } else if (kec) {
       level = "kecamatan";
-      regions = [{
-        name: kec,
+      const desaList = await new Promise((resolve, reject) =>
+        desCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kec))
+          .aggregate_array("des")
+          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
+      );
+      regions = (desaList || []).map((desaName) => ({
+        name: desaName,
         collection: desCollection
           .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec)),
-      }];
+          .filter(ee.Filter.eq("kec", kec))
+          .filter(ee.Filter.eq("des", desaName)),
+      }));
     } else if (kab) {
       level = "kabupaten";
-      regions = [{
-        name: kab,
-        collection: kecCollection.filter(ee.Filter.eq("kab", kab)),
-      }];
+      const kecList = await new Promise((resolve, reject) =>
+        kecCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .aggregate_array("kec")
+          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
+      );
+      regions = (kecList || []).map((kecName) => ({
+        name: kecName,
+        collection: kecCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kecName)),
+      }));
     } else {
       level = "kabupaten";
       regions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
@@ -211,7 +228,6 @@ router.get("/stack-chart", async (req, res, next) => {
     res.json({
       year: selectedYear,
       level,
-      nameKey,
       rows: allRows,
       labels: STACK_LABELS,
       colors: STACK_COLORS,
