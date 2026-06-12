@@ -6,7 +6,7 @@ module.exports = {
 
       // Number of instances — "max" uses all available CPU cores (cluster mode)
       // Use 1 if GEE auth state must not be shared across processes
-      instances: max,
+      instances: "max",
 
       // Automatically restart if the process crashes
       autorestart: true,
