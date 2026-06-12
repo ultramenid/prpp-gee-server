@@ -1,6 +1,8 @@
 const { badRequest } = require("./httpErrors");
 
 const INTEGER_PATTERN = /^-?\d+$/;
+const MAPBIOMAS_MIN_YEAR = 1985;
+const MAPBIOMAS_MAX_YEAR = 2024;
 
 function parseSingleYear(value, defaultYear) {
   if (value === undefined) return defaultYear;
@@ -11,6 +13,23 @@ function parseSingleYear(value, defaultYear) {
   }
 
   return Number.parseInt(normalized, 10);
+}
+
+function parseYearRange(startValue, endValue, defaults = { start: 2013, end: 2024 }) {
+  const startYear = parseSingleYear(startValue, defaults.start);
+  const endYear = parseSingleYear(endValue, defaults.end);
+
+  if (startYear < MAPBIOMAS_MIN_YEAR || startYear > MAPBIOMAS_MAX_YEAR) {
+    throw badRequest(`startYear must be between ${MAPBIOMAS_MIN_YEAR} and ${MAPBIOMAS_MAX_YEAR}`);
+  }
+  if (endYear < MAPBIOMAS_MIN_YEAR || endYear > MAPBIOMAS_MAX_YEAR) {
+    throw badRequest(`endYear must be between ${MAPBIOMAS_MIN_YEAR} and ${MAPBIOMAS_MAX_YEAR}`);
+  }
+  if (startYear >= endYear) {
+    throw badRequest("startYear must be less than endYear");
+  }
+
+  return { startYear, endYear };
 }
 
 function parseYearList(value, defaultYears) {
@@ -24,4 +43,4 @@ function parseYearList(value, defaultYears) {
   return parts.map((part) => Number.parseInt(part, 10));
 }
 
-module.exports = { parseSingleYear, parseYearList };
+module.exports = { parseSingleYear, parseYearList, parseYearRange, MAPBIOMAS_MIN_YEAR, MAPBIOMAS_MAX_YEAR };
