@@ -102,101 +102,135 @@ router.get("/lulc-stats", async (req, res, next) => {
 });
 
 // 100% Stacked Bar — percentage composition of land cover per LTKL kabupaten
-// for a single year (default 2024). Returns one row per kabupaten with each
+// for a single year (default 2024). Returns one row per sub-region with each
 // stack label as a percentage (0-100).
-// Accepts optional ?kab=<name> to restrict to a single kabupaten.
+// Supports drill-down filters:
+//   (none)                 -> group by kabupaten
+//   ?kab=<name>            -> group by kecamatan within that kabupaten
+//   ?kab=<name>&kec=<name> -> group by desa within that kecamatan
+//   ?kab=<name>&kec=<name>&des=<name> -> single desa row (frontend renders as pie)
 router.get("/stack-chart", async (req, res, next) => {
   try {
     const selectedYear = parseSingleYear(req.query.year, 2024);
-    const requestedKab = req.query.kab;
+    const { kab, kec, des } = req.query;
     const yearBand = "classification_" + selectedYear;
 
-    const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41).select(yearBand).rename("class");
-    const kabCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
-
-    // If a specific kabupaten is requested, validate it and use only that one.
-    const kabupatenList = requestedKab
-      ? (LTKL_KABUPATEN_LIST.includes(requestedKab) ? [requestedKab] : [])
-      : LTKL_KABUPATEN_LIST;
-
-    if (requestedKab && kabupatenList.length === 0) {
-      return res.status(400).json({ error: `Kabupaten "${requestedKab}" tidak ditemukan dalam daftar LTKL.` });
+    // Validate hierarchy
+    if (des && !kec) {
+      return res.status(400).json({ error: "Parameter kec diperlukan ketika des diberikan." });
+    }
+    if (kec && !kab) {
+      return res.status(400).json({ error: "Parameter kab diperlukan ketika kec diberikan." });
+    }
+    if (kab && !LTKL_KABUPATEN_LIST.includes(kab)) {
+      return res.status(400).json({ error: `Kabupaten "${kab}" tidak ditemukan dalam daftar LTKL.` });
     }
 
-    const features = ee.FeatureCollection(
-      ee.List(kabupatenList).map(function (kabupaten) {
-        kabupaten = ee.String(kabupaten);
+    const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41).select(yearBand).rename("class");
+    const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
+    const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
-        const kabRegion = kabCollection.filter(ee.Filter.eq("kab", kabupaten));
+    // Determine drill-down level and sub-regions to process
+    let level = "kabupaten";
+    let nameKey = "kabupaten";
+    let regions = [];
 
-        const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
+    if (des) {
+      level = "desa";
+      nameKey = "des";
+      regions = [{
+        name: des,
+        collection: desCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kec))
+          .filter(ee.Filter.eq("des", des)),
+      }];
+    } else if (kec) {
+      level = "kecamatan";
+      nameKey = "des";
+      const desaList = await new Promise((resolve, reject) =>
+        desCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kec))
+          .aggregate_array("des")
+          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
+      );
+      regions = (desaList || []).map((desaName) => ({
+        name: desaName,
+        collection: desCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kec))
+          .filter(ee.Filter.eq("des", desaName)),
+      }));
+    } else if (kab) {
+      level = "kabupaten";
+      nameKey = "kec";
+      const kecList = await new Promise((resolve, reject) =>
+        kecCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .aggregate_array("kec")
+          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
+      );
+      regions = (kecList || []).map((kecName) => ({
+        name: kecName,
+        collection: kecCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kecName)),
+      }));
+    } else {
+      level = "kabupaten";
+      nameKey = "kabupaten";
+      regions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
+        name: kabupatenName,
+        collection: kecCollection.filter(ee.Filter.eq("kab", kabupatenName)),
+      }));
+    }
 
-        const areaByClass = pixelAreaHa.addBands(mapbiomasImage).reduceRegion({
-          reducer: ee.Reducer.sum().group({ groupField: 1 }),
-          geometry: kabRegion.geometry(),
-          scale: 30,
-          maxPixels: 1e13,
-        });
+    // Process each sub-region individually (client-side loop — consistent with sankey)
+    const allRows = [];
+    for (const { name, collection } of regions) {
+      const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
 
-        const groups = ee.List(
-          ee.Algorithms.If(areaByClass.contains("groups"), areaByClass.get("groups"), [])
-        );
+      const areaByClass = pixelAreaHa.addBands(mapbiomasImage).reduceRegion({
+        reducer: ee.Reducer.sum().group({ groupField: 1 }),
+        geometry: collection.geometry(),
+        scale: 30,
+        maxPixels: 1e13,
+      });
 
-        const areaDict = ee.Dictionary(
-          groups.iterate(function (item, acc) {
-            item = ee.Dictionary(item);
-            const cls = ee.Number(item.get("group")).format("%d");
-            const ha = ee.Number(item.get("sum"));
-            return ee.Dictionary(acc).set(cls, ha);
-          }, ee.Dictionary({}))
-        );
+      const groups = ee.List(
+        ee.Algorithms.If(areaByClass.contains("groups"), areaByClass.get("groups"), [])
+      );
 
-        const total = ee.Number(
-          ee.List(STACK_KEYS).map(function (id) {
-            const key = ee.String(id);
-            return ee.Number(ee.Algorithms.If(areaDict.contains(key), areaDict.getNumber(key), 0));
-          }).reduce(ee.Reducer.sum())
-        );
+      const rawGroups = await new Promise((resolve, reject) =>
+        groups.evaluate((value, err) => (err ? reject(err) : resolve(value)))
+      );
 
-        let props = ee.Dictionary({
-          kabupaten: kabupaten,
-          tahun: selectedYear,
-          total_ha: total,
-        });
+      const areaDict = {};
+      for (const item of rawGroups || []) {
+        areaDict[String(item.group)] = Number(item.sum);
+      }
 
-        STACK_LABELS.forEach(function (label, i) {
-          const key = STACK_KEYS[i];
-          const area = ee.Number(
-            ee.Algorithms.If(areaDict.contains(key), areaDict.getNumber(key), 0)
-          );
-          const percent = ee.Number(
-            ee.Algorithms.If(total.gt(0), area.divide(total).multiply(100), 0)
-          );
-          props = props.set(label, percent);
-        });
+      let total = 0;
+      for (const key of STACK_KEYS) {
+        total += areaDict[key] || 0;
+      }
 
-        return ee.Feature(null, props);
-      })
-    );
+      const row = { name, total_ha: total };
+      for (let i = 0; i < STACK_LABELS.length; i++) {
+        const key = STACK_KEYS[i];
+        const area = areaDict[key] || 0;
+        row[STACK_LABELS[i]] = total > 0 ? (area / total) * 100 : 0;
+      }
 
-    const rows = await new Promise((resolve, reject) =>
-      features.getInfo((value, err) => (err ? reject(err) : resolve(value)))
-    );
+      allRows.push(row);
+    }
 
     res.json({
       year: selectedYear,
-      kabupaten: rows.features.map((f) => {
-        const p = f.properties;
-        const breakdown = {};
-        STACK_LABELS.forEach((label) => {
-          breakdown[label] = Number(p[label] || 0);
-        });
-        return {
-          kabupaten: p.kabupaten,
-          total_ha: Number(p.total_ha || 0),
-          ...breakdown,
-        };
-      }),
+      level,
+      nameKey,
+      rows: allRows,
       labels: STACK_LABELS,
       colors: STACK_COLORS,
       keys: STACK_KEYS,
