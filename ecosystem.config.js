@@ -11,6 +11,14 @@ module.exports = {
       // Automatically restart if the process crashes
       autorestart: true,
 
+      // Restart guards — keep a crash-on-startup (e.g. port already in use)
+      // from becoming a tight infinite restart loop. A process must stay up
+      // min_uptime to count as a successful start; after max_restarts rapid
+      // failures PM2 gives up and marks it "errored" instead of hammering.
+      min_uptime: "10s",
+      max_restarts: 10,
+      restart_delay: 4000,
+
       // Restart if memory exceeds 512 MB (GEE responses can be large)
       max_memory_restart: "512M",
 
