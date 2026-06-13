@@ -1,14 +1,14 @@
 {
-  "name": "prpp-gee-server",
+  "name": "ltkl-gee-server",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node api/index.js",
     "dev": "nodemon api/index.js",
     "prod": "pm2 start ecosystem.config.js --env production",
-    "prod:stop": "pm2 stop prpp-gee-server",
-    "prod:restart": "pm2 restart prpp-gee-server",
-    "prod:logs": "pm2 logs prpp-gee-server",
+    "prod:stop": "pm2 stop ltkl-gee-server",
+    "prod:restart": "pm2 restart ltkl-gee-server",
+    "prod:logs": "pm2 logs ltkl-gee-server",
     "test": "node --test"
   },
   "keywords": [],
