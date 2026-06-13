@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "prpp-gee-server",
+      name: "ltkl-gee-server",
       script: "api/index.js",
 
       // Number of instances — "max" uses all available CPU cores (cluster mode)
