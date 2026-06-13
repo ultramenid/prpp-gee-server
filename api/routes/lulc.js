@@ -13,6 +13,23 @@ const { parseSingleYear, parseYearList, parseYearRange } = require("../utils/yea
 
 const router = express.Router();
 
+// Run an array of thunks (() => Promise) with a bounded number in flight at
+// once, preserving result order. Keeps fan-out work (per-region × per-year EE
+// reductions) parallel without opening an unbounded number of requests.
+async function runWithConcurrency(tasks, limit) {
+  const results = new Array(tasks.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(limit, tasks.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < tasks.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await tasks[currentIndex]();
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 router.get("/lulc", async (req, res, next) => {
   try {
     const { kab, kec, des } = req.query;
@@ -101,19 +118,23 @@ router.get("/lulc-stats", async (req, res, next) => {
   }
 });
 
-// 100% Stacked Bar — percentage composition of land cover per LTKL kabupaten
-// for a single year (default 2024). Returns one row per sub-region with each
-// stack label as a percentage (0-100).
-// Supports drill-down filters:
-//   (none)                 -> group by kabupaten
-//   ?kab=<name>            -> group by kecamatan within that kabupaten
-//   ?kab=<name>&kec=<name> -> group by desa within that kecamatan
-//   ?kab=<name>&kec=<name>&des=<name> -> single desa row (frontend renders as pie)
+// Stacked Bar — land-cover composition as a YEAR SERIES (default 1990-2024).
+// Returns one row per year, each stack label carrying the ABSOLUTE area in
+// hectares for that year; `total_ha` is the sum across all classes (used for
+// the percentage shown in the tooltip).
+// The drill level only changes the geometry scope — the chart is always a
+// per-year trend for the focused region:
+//   (none)                            -> all 9 LTKL kabupaten summed
+//   ?kab=<name>                       -> that kabupaten
+//   ?kab=<name>&kec=<name>            -> that kecamatan
+//   ?kab=<name>&kec=<name>&des=<name> -> that desa
 router.get("/stack-chart", async (req, res, next) => {
   try {
-    const selectedYear = parseSingleYear(req.query.year, 2024);
+    const { startYear, endYear } = parseYearRange(req.query.startYear, req.query.endYear, {
+      start: 1990,
+      end: 2024,
+    });
     const { kab, kec, des } = req.query;
-    const yearBand = "classification_" + selectedYear;
 
     // Validate hierarchy
     if (des && !kec) {
@@ -126,22 +147,25 @@ router.get("/stack-chart", async (req, res, next) => {
       return res.status(400).json({ error: `Kabupaten "${kab}" tidak ditemukan dalam daftar LTKL.` });
     }
 
-    const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41).select(yearBand).rename("class");
+    const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
     const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
     const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
-    // Determine drill-down level and sub-regions to process.
-    //   (none)                 -> one row per kabupaten     (stacked bar)
-    //   ?kab=<name>            -> one row per kecamatan    (stacked bar)
-    //   ?kab=<name>&kec=<name> -> one row per desa         (stacked bar)
-    //   ?kab=<name>&kec=<name>&des=<name> -> single row    (pie chart)
-    let level = "kabupaten";
-    let regions = [];
+    // Resolve the drill level into a list of LEAF regions to sum over. Area by
+    // class is additive across disjoint regions, so we never union all 9
+    // kabupaten into one giant multipolygon (that reduceRegion times out).
+    // Instead each kabupaten is reduced separately (small, parallelizable
+    // geometry — like the Sankey loop) and the per-year areas are summed in
+    // Node.
+    let level;
+    let scope;
+    let leafRegions; // [{ key, collection }]
 
     if (des) {
       level = "desa";
-      regions = [{
-        name: des,
+      scope = des;
+      leafRegions = [{
+        key: des,
         collection: desCollection
           .filter(ee.Filter.eq("kab", kab))
           .filter(ee.Filter.eq("kec", kec))
@@ -149,86 +173,110 @@ router.get("/stack-chart", async (req, res, next) => {
       }];
     } else if (kec) {
       level = "kecamatan";
-      const desaList = await new Promise((resolve, reject) =>
-        desCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec))
-          .aggregate_array("des")
-          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
-      );
-      regions = (desaList || []).map((desaName) => ({
-        name: desaName,
-        collection: desCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec))
-          .filter(ee.Filter.eq("des", desaName)),
-      }));
-    } else if (kab) {
-      level = "kabupaten";
-      const kecList = await new Promise((resolve, reject) =>
-        kecCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .aggregate_array("kec")
-          .evaluate((value, err) => (err ? reject(err) : resolve(value)))
-      );
-      regions = (kecList || []).map((kecName) => ({
-        name: kecName,
+      scope = kec;
+      leafRegions = [{
+        key: kec,
         collection: kecCollection
           .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kecName)),
-      }));
-    } else {
+          .filter(ee.Filter.eq("kec", kec)),
+      }];
+    } else if (kab) {
       level = "kabupaten";
-      regions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
-        name: kabupatenName,
+      scope = kab;
+      leafRegions = [{ key: kab, collection: kecCollection.filter(ee.Filter.eq("kab", kab)) }];
+    } else {
+      level = "ltkl";
+      scope = "Semua Kabupaten LTKL";
+      leafRegions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
+        key: kabupatenName,
         collection: kecCollection.filter(ee.Filter.eq("kab", kabupatenName)),
       }));
     }
 
-    // Process each sub-region individually (client-side loop — consistent with sankey)
-    const allRows = [];
-    for (const { name, collection } of regions) {
-      const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
+    const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
 
-      const areaByClass = pixelAreaHa.addBands(mapbiomasImage).reduceRegion({
+    const years = [];
+    for (let year = startYear; year <= endYear; year++) years.push(year);
+
+    // Grouped area-by-class reduction for one region + one year, as an EE
+    // Feature. This is a composition TREND, not the 30 m map: capping pixels at
+    // ~1e6 lets bestEffort coarsen the scale for large regions (a whole
+    // kabupaten like Kapuas Hulu drops from ~35M px @30m — which times out — to
+    // a fast ~1e6 px), while small regions (a desa) still resolve near 30 m.
+    const MAX_PIXELS_PER_REGION = 1e6;
+    const yearFeature = (geometry, yearValue) => {
+      const band = ee.String("classification_").cat(ee.Number(yearValue).format("%d"));
+      const classImage = mapbiomasImage.select(band).rename("class");
+      const areaByClass = pixelAreaHa.addBands(classImage).reduceRegion({
         reducer: ee.Reducer.sum().group({ groupField: 1 }),
-        geometry: collection.geometry(),
+        geometry,
         scale: 30,
-        maxPixels: 1e13,
+        maxPixels: MAX_PIXELS_PER_REGION,
+        bestEffort: true,
+        tileScale: 4,
       });
+      return ee.Feature(null, {
+        year: yearValue,
+        groups: ee.Algorithms.If(areaByClass.contains("groups"), areaByClass.get("groups"), []),
+      });
+    };
 
-      const groups = ee.List(
-        ee.Algorithms.If(areaByClass.contains("groups"), areaByClass.get("groups"), [])
-      );
-
-      const rawGroups = await new Promise((resolve, reject) =>
-        groups.evaluate((value, err) => (err ? reject(err) : resolve(value)))
-      );
-
-      const areaDict = {};
-      for (const item of rawGroups || []) {
-        areaDict[String(item.group)] = Number(item.sum);
+    // One round-trip = one region × a batch of years. Each is small; we run
+    // many of them through a bounded concurrency pool so the all-LTKL case
+    // (9 regions) parallelizes without flooding Earth Engine with requests.
+    const BATCH_SIZE = 6;
+    const MAX_CONCURRENCY = 8;
+    const tasks = [];
+    for (const { collection } of leafRegions) {
+      const geometry = collection.geometry();
+      for (let i = 0; i < years.length; i += BATCH_SIZE) {
+        const batchYears = years.slice(i, i + BATCH_SIZE);
+        tasks.push(
+          () =>
+            new Promise((resolve, reject) =>
+              ee
+                .FeatureCollection(ee.List(batchYears).map((year) => yearFeature(geometry, year)))
+                .evaluate((value, err) => (err ? reject(err) : resolve(value?.features || [])))
+            ),
+        );
       }
-
-      let total = 0;
-      for (const key of STACK_KEYS) {
-        total += areaDict[key] || 0;
-      }
-
-      const row = { name, total_ha: total };
-      for (let i = 0; i < STACK_LABELS.length; i++) {
-        const key = STACK_KEYS[i];
-        const area = areaDict[key] || 0;
-        row[STACK_LABELS[i]] = total > 0 ? (area / total) * 100 : 0;
-      }
-
-      allRows.push(row);
     }
 
+    const taskResults = await runWithConcurrency(tasks, MAX_CONCURRENCY);
+
+    // Sum area per class per year across every leaf region.
+    const areaByYearByKey = {}; // year -> { classKey: hectares }
+    for (const features of taskResults) {
+      for (const feature of features) {
+        const props = feature.properties || {};
+        const year = Number(props.year);
+        if (!areaByYearByKey[year]) areaByYearByKey[year] = {};
+        for (const item of props.groups || []) {
+          const key = String(item.group);
+          areaByYearByKey[year][key] = (areaByYearByKey[year][key] || 0) + Number(item.sum);
+        }
+      }
+    }
+
+    const rows = years.map((year) => {
+      const areaDict = areaByYearByKey[year] || {};
+
+      let total = 0;
+      for (const key of STACK_KEYS) total += areaDict[key] || 0;
+
+      const row = { name: String(year), year, total_ha: total };
+      for (let i = 0; i < STACK_LABELS.length; i++) {
+        row[STACK_LABELS[i]] = areaDict[STACK_KEYS[i]] || 0;
+      }
+      return row;
+    });
+
     res.json({
-      year: selectedYear,
+      startYear,
+      endYear,
       level,
-      rows: allRows,
+      scope,
+      rows,
       labels: STACK_LABELS,
       colors: STACK_COLORS,
       keys: STACK_KEYS,
