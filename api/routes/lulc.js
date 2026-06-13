@@ -236,7 +236,7 @@ router.get("/stack-chart", async (req, res, next) => {
             new Promise((resolve, reject) =>
               ee
                 .FeatureCollection(ee.List(batchYears).map((year) => yearFeature(geometry, year)))
-                .evaluate((value, err) => (err ? reject(err) : resolve(value?.features || [])))
+                .evaluate((value, err) => (err ? reject(err) : resolve((value && value.features) || [])))
             ),
         );
       }
