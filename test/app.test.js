@@ -67,3 +67,30 @@ test("GET /gee/lulc-stats rejects empty year entries", async () => {
 
   assert.deepEqual(response.body, { error: "year must contain comma-separated integers" });
 });
+
+test("GET /gee/classes returns the Level-1/Level-2 hierarchy", async () => {
+  const app = require("../api/app");
+
+  const response = await request(app).get("/gee/classes").expect(200);
+
+  assert.equal(response.body.level1.length, 5);
+  assert.equal(response.body.level2.length, 13);
+
+  // Every Level-2 class maps to a known Level-1 group.
+  const groupKeys = new Set(response.body.level1.map((group) => group.key));
+  for (const klass of response.body.level2) {
+    assert.ok(groupKeys.has(klass.grp), `unknown group ${klass.grp}`);
+  }
+
+  // mapping children must match the Level-2 ids assigned to each group.
+  for (const group of response.body.level1) {
+    const idsInGroup = response.body.level2
+      .filter((klass) => klass.grp === group.key)
+      .map((klass) => klass.id)
+      .sort((a, b) => a - b);
+    assert.deepEqual(
+      [...response.body.mapping[group.key]].sort((a, b) => a - b),
+      idsInGroup
+    );
+  }
+});

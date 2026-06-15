@@ -19,7 +19,8 @@ api/
     yearValidation.js   ← Year query parsing and validation
   routes/
     mapid.js            ← GET /mapid
-    lulc.js             ← GET /gee/lulc, GET /gee/lulc-stats
+    lulc.js             ← GET /gee/lulc, GET /gee/lulc-stats, /stack-chart, /sankey-transition
+    classes.js          ← GET /gee/classes (LULC class hierarchy)
 ecosystem.config.js     ← PM2 production config
 ```
 
@@ -165,3 +166,19 @@ GET /gee/lulc-stats?year=2020,2021,2024
 ```
 
 `year` must be one integer or comma-separated integers. The API does not enforce a fixed year range because new MapBiomas bands may be added over time.
+
+---
+
+### `GET /gee/classes`
+
+Returns the LULC class hierarchy as pure metadata (no Earth Engine call). Use it to build legends and roll Level-2 classes up into Level-1 groups.
+
+- `level1` — the 5 aggregate groups: `{ key, label, color, children: [classId, ...] }`
+- `level2` — the 13 classes: `{ id, label, color, grp }` (`grp` is the parent Level-1 key)
+- `mapping` — `{ L1_1: [3, 5, 76], ... }`, Level-1 key → child Level-2 ids
+
+**Example:**
+
+```
+GET /gee/classes
+```

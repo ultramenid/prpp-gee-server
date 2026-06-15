@@ -8,7 +8,23 @@ const {
   STACK_KEYS,
   STACK_LABELS,
   STACK_COLORS,
+  STACK_CLASSES,
+  LEVEL1_GROUPS,
 } = require("../config/assets");
+
+// Level-2 class id -> Level-1 group key (from STACK_CLASSES.grp). Used to roll the
+// 13-class transition matrix up into the 5 Level-1 groups for the Sankey, so the
+// chart and tooltip show the Level-1 grouping while each group->group value stays
+// the exact sum of its Level-2 children.
+const CLASS_TO_GROUP_KEY = Object.fromEntries(
+  STACK_CLASSES.map((c) => [Number(c.key), c.grp])
+);
+// Class key (string) -> full class descriptor, for building the 2-level coverage
+// hierarchy (Tingkat 1 group -> Tingkat 2 class) consumed by the sunburst chart.
+const STACK_CLASS_BY_KEY = Object.fromEntries(STACK_CLASSES.map((c) => [c.key, c]));
+const LEVEL1_KEYS = LEVEL1_GROUPS.map((g) => g.key);
+const LEVEL1_LABELS = LEVEL1_GROUPS.map((g) => g.label);
+const LEVEL1_COLORS = LEVEL1_GROUPS.map((g) => g.color);
 const { parseSingleYear, parseYearList, parseYearRange } = require("../utils/yearValidation");
 
 const router = express.Router();
@@ -53,7 +69,7 @@ router.get("/lulc-stats", async (req, res, next) => {
   try {
     const yearList = parseYearList(req.query.year, [2024]);
     const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
-    const kabCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
+    const kabCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
 
     let resultByYear = ee.Dictionary({});
 
@@ -148,6 +164,7 @@ router.get("/stack-chart", async (req, res, next) => {
     }
 
     const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
+    const kabCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
     const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
     const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
@@ -156,7 +173,9 @@ router.get("/stack-chart", async (req, res, next) => {
     // kabupaten into one giant multipolygon (that reduceRegion times out).
     // Instead each kabupaten is reduced separately (small, parallelizable
     // geometry — like the Sankey loop) and the per-year areas are summed in
-    // Node.
+    // Node. Kabupaten-level scopes use the clean kabupatenCollection boundary
+    // (avoids the sliver loss from dissolving kecamatan); finer scopes use
+    // kecamatan/desa.
     let level;
     let scope;
     let leafRegions; // [{ key, collection }]
@@ -183,13 +202,13 @@ router.get("/stack-chart", async (req, res, next) => {
     } else if (kab) {
       level = "kabupaten";
       scope = kab;
-      leafRegions = [{ key: kab, collection: kecCollection.filter(ee.Filter.eq("kab", kab)) }];
+      leafRegions = [{ key: kab, collection: kabCollection.filter(ee.Filter.eq("kab", kab)) }];
     } else {
       level = "ltkl";
       scope = "Semua Kabupaten LTKL";
       leafRegions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
         key: kabupatenName,
-        collection: kecCollection.filter(ee.Filter.eq("kab", kabupatenName)),
+        collection: kabCollection.filter(ee.Filter.eq("kab", kabupatenName)),
       }));
     }
 
@@ -199,11 +218,11 @@ router.get("/stack-chart", async (req, res, next) => {
     for (let year = startYear; year <= endYear; year++) years.push(year);
 
     // Grouped area-by-class reduction for one region + one year, as an EE
-    // Feature. This is a composition TREND, not the 30 m map: capping pixels at
-    // ~1e6 lets bestEffort coarsen the scale for large regions (a whole
-    // kabupaten like Kapuas Hulu drops from ~35M px @30m — which times out — to
-    // a fast ~1e6 px), while small regions (a desa) still resolve near 30 m.
-    const MAX_PIXELS_PER_REGION = 1e6;
+    // Feature. Reduces at the native 30 m scale with maxPixels high enough that
+    // Earth Engine never coarsens (no bestEffort): coarsening picks a different
+    // pixel scale per region+year, so its rounding error drifts year to year and
+    // the year-over-year trend becomes noisy. Exact reduction costs ~20× more
+    // compute but keeps each year's areas stable and comparable.
     const yearFeature = (geometry, yearValue) => {
       const band = ee.String("classification_").cat(ee.Number(yearValue).format("%d"));
       const classImage = mapbiomasImage.select(band).rename("class");
@@ -211,9 +230,8 @@ router.get("/stack-chart", async (req, res, next) => {
         reducer: ee.Reducer.sum().group({ groupField: 1 }),
         geometry,
         scale: 30,
-        maxPixels: MAX_PIXELS_PER_REGION,
-        bestEffort: true,
-        tileScale: 4,
+        maxPixels: 1e13,
+        tileScale: 8,
       });
       return ee.Feature(null, {
         year: yearValue,
@@ -221,10 +239,11 @@ router.get("/stack-chart", async (req, res, next) => {
       });
     };
 
-    // One round-trip = one region × a batch of years. Each is small; we run
-    // many of them through a bounded concurrency pool so the all-LTKL case
-    // (9 regions) parallelizes without flooding Earth Engine with requests.
-    const BATCH_SIZE = 6;
+    // One round-trip = one region × a batch of years. Exact reduction makes each
+    // round-trip much heavier than the old bestEffort path, so we keep batches
+    // small — finer-grained tasks parallelize better across the concurrency pool
+    // and keep every single Earth Engine request well under its compute limit.
+    const BATCH_SIZE = 3;
     const MAX_CONCURRENCY = 8;
     const tasks = [];
     for (const { collection } of leafRegions) {
@@ -286,6 +305,133 @@ router.get("/stack-chart", async (req, res, next) => {
   }
 });
 
+// Coverage hierarchy — land-cover composition for a SINGLE year as a 2-level
+// tree (Tingkat 1 group -> Tingkat 2 class), feeding the nested-donut/sunburst
+// chart. Each group's value is the exact sum of its Level-2 children, so the
+// inner ring (groups) and outer ring (classes) always reconcile. The drill
+// level only changes the geometry scope (same boundaries as the stack chart):
+//   (none)                            -> all 9 LTKL kabupaten summed
+//   ?kab=<name>                       -> that kabupaten (clean boundary)
+//   ?kab=<name>&kec=<name>            -> that kecamatan
+//   ?kab=<name>&kec=<name>&des=<name> -> that desa
+router.get("/coverage-hierarchy", async (req, res, next) => {
+  try {
+    const year = parseSingleYear(req.query.year, 2024);
+    const { kab, kec, des } = req.query;
+
+    if (des && !kec) {
+      return res.status(400).json({ error: "Parameter kec diperlukan ketika des diberikan." });
+    }
+    if (kec && !kab) {
+      return res.status(400).json({ error: "Parameter kab diperlukan ketika kec diberikan." });
+    }
+    if (kab && !LTKL_KABUPATEN_LIST.includes(kab)) {
+      return res.status(400).json({ error: `Kabupaten "${kab}" tidak ditemukan dalam daftar LTKL.` });
+    }
+
+    const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
+    const kabCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
+    const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
+    const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
+
+    // Resolve the drill level into a list of LEAF regions to sum over — area by
+    // class is additive across disjoint regions, so each kabupaten is reduced
+    // separately (small, parallelizable geometry) rather than unioning all 9
+    // into one giant multipolygon. Kabupaten-level scopes use the clean
+    // kabupatenCollection boundary (avoids the sliver loss from dissolving
+    // kecamatan); finer scopes use kecamatan/desa.
+    let level;
+    let scope;
+    let leafRegions;
+
+    if (des) {
+      level = "desa";
+      scope = des;
+      leafRegions = [{
+        collection: desCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kec))
+          .filter(ee.Filter.eq("des", des)),
+      }];
+    } else if (kec) {
+      level = "kecamatan";
+      scope = kec;
+      leafRegions = [{
+        collection: kecCollection
+          .filter(ee.Filter.eq("kab", kab))
+          .filter(ee.Filter.eq("kec", kec)),
+      }];
+    } else if (kab) {
+      level = "kabupaten";
+      scope = kab;
+      leafRegions = [{ collection: kabCollection.filter(ee.Filter.eq("kab", kab)) }];
+    } else {
+      level = "ltkl";
+      scope = "Semua Kabupaten LTKL";
+      leafRegions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
+        collection: kabCollection.filter(ee.Filter.eq("kab", kabupatenName)),
+      }));
+    }
+
+    const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
+    const classImage = mapbiomasImage.select("classification_" + year).rename("class");
+
+    // Grouped area-by-class reduction for one region at native 30 m scale with no
+    // coarsening (no bestEffort) — identical precision to the stack chart so a
+    // shared year's totals agree across charts.
+    const reduceAreaByClass = (geometry) => {
+      const areaByClass = pixelAreaHa.addBands(classImage).reduceRegion({
+        reducer: ee.Reducer.sum().group({ groupField: 1 }),
+        geometry,
+        scale: 30,
+        maxPixels: 1e13,
+        tileScale: 8,
+      });
+      const groups = ee.List(
+        ee.Algorithms.If(areaByClass.contains("groups"), areaByClass.get("groups"), [])
+      );
+      return new Promise((resolve, reject) =>
+        groups.evaluate((value, err) => (err ? reject(err) : resolve(value || [])))
+      );
+    };
+
+    const MAX_CONCURRENCY = 8;
+    const tasks = leafRegions.map(({ collection }) => () => reduceAreaByClass(collection.geometry()));
+    const taskResults = await runWithConcurrency(tasks, MAX_CONCURRENCY);
+
+    // Sum area per class across every leaf region.
+    const areaByKey = {}; // classKey -> hectares
+    for (const groups of taskResults) {
+      for (const item of groups) {
+        const key = String(item.group);
+        areaByKey[key] = (areaByKey[key] || 0) + Number(item.sum);
+      }
+    }
+
+    // Build the 2-level hierarchy from the single source (LEVEL1_GROUPS + the
+    // class descriptors). Drop zero-area classes and empty groups so the donut
+    // only renders slices that exist for this region/year.
+    let totalHa = 0;
+    const groups = LEVEL1_GROUPS.map((group) => {
+      const children = group.children
+        .map((classId) => {
+          const cls = STACK_CLASS_BY_KEY[String(classId)];
+          if (!cls) return null;
+          const value = areaByKey[String(classId)] || 0;
+          return { key: cls.key, label: cls.label, color: cls.color, value };
+        })
+        .filter((child) => child && child.value > 0);
+      const value = children.reduce((sum, child) => sum + child.value, 0);
+      totalHa += value;
+      return { key: group.key, label: group.label, color: group.color, value, children };
+    }).filter((group) => group.value > 0);
+
+    res.json({ year, level, scope, total_ha: totalHa, groups });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Sankey transition — land-cover change matrix between two years.
 // Returns ECharts-compatible nodes + links using the same colors/labels as the stack chart.
 // Strategy: process each sub-region individually (fast geometry) then aggregate results in
@@ -300,6 +446,7 @@ router.get("/sankey-transition", async (req, res, next) => {
     const { kab, kec, des } = req.query;
 
     const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
+    const kabCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
     const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
     const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
@@ -330,24 +477,36 @@ router.get("/sankey-transition", async (req, res, next) => {
     const transitionImage = startStack.multiply(1000).add(endStack).rename("transition");
     const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
 
-    // Determine drill-down level and the list of sub-regions to process.
+    // Determine drill-down level, the clean enclosing boundary used for the
+    // headline transition totals, and the list of sub-regions used only for the
+    // per-detail breakdown. Totals reduce over `aggregateGeometry` — the SAME
+    // clean boundary the stack chart uses at each level (kabupatenCollection for
+    // a kabupaten, kecamatan polygon for a kecamatan, desa polygon for a desa) —
+    // so the two charts never disagree on a shared figure. The detail regions are
+    // finer polygons whose slivers don't perfectly tile the parent, so their
+    // per-detail values can sum to slightly less than the headline total. When
+    // there is no single enclosing polygon (all-LTKL view), aggregateGeometry is
+    // null and the totals are summed from the per-kabupaten detail reductions.
     let level = "kabupaten";
     let detailsLabel = "Kabupaten";
+    let aggregateGeometry = null;
     let regions = []; // { key: detail name, collection: ee.FeatureCollection }
 
     if (des) {
       level = "desa";
       detailsLabel = null;
-      regions = [{
-        key: des,
-        collection: desCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec))
-          .filter(ee.Filter.eq("des", des)),
-      }];
+      aggregateGeometry = desCollection
+        .filter(ee.Filter.eq("kab", kab))
+        .filter(ee.Filter.eq("kec", kec))
+        .filter(ee.Filter.eq("des", des))
+        .geometry();
     } else if (kec) {
       level = "kecamatan";
       detailsLabel = "Desa";
+      aggregateGeometry = kecCollection
+        .filter(ee.Filter.eq("kab", kab))
+        .filter(ee.Filter.eq("kec", kec))
+        .geometry();
       const desaList = await new Promise((resolve, reject) =>
         desCollection
           .filter(ee.Filter.eq("kab", kab))
@@ -365,6 +524,7 @@ router.get("/sankey-transition", async (req, res, next) => {
     } else if (kab) {
       level = "kabupaten";
       detailsLabel = "Kecamatan";
+      aggregateGeometry = kabCollection.filter(ee.Filter.eq("kab", kab)).geometry();
       const kecList = await new Promise((resolve, reject) =>
         kecCollection
           .filter(ee.Filter.eq("kab", kab))
@@ -382,35 +542,54 @@ router.get("/sankey-transition", async (req, res, next) => {
       detailsLabel = "Kabupaten";
       regions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
         key: kabupatenName,
-        collection: kecCollection.filter(ee.Filter.eq("kab", kabupatenName)),
+        collection: kabCollection.filter(ee.Filter.eq("kab", kabupatenName)),
       }));
     }
 
-    // Accumulate transition counts (total + per sub-region details).
-    const aggregated = {}; // code -> totalValue
-    const perDetail = {};  // code -> { detailName: value }
-
-    for (const { key, collection } of regions) {
+    // Reduce the start->end transition area (grouped by transition code) over one
+    // geometry at native 30 m scale with no coarsening — identical precision to
+    // the stack chart so the two never disagree on a shared figure.
+    const reduceTransitions = async (geometry) => {
       const areaByTransition = pixelAreaHa.addBands(transitionImage).reduceRegion({
         reducer: ee.Reducer.sum().group({ groupField: 1 }),
-        geometry: collection.geometry(),
+        geometry,
         scale: 30,
         maxPixels: 1e13,
+        tileScale: 8,
       });
-
       const groups = ee.List(
         ee.Algorithms.If(areaByTransition.contains("groups"), areaByTransition.get("groups"), [])
       );
-
-      const rawGroups = await new Promise((resolve, reject) =>
-        groups.evaluate((value, err) => (err ? reject(err) : resolve(value)))
+      return new Promise((resolve, reject) =>
+        groups.evaluate((value, err) => (err ? reject(err) : resolve(value || [])))
       );
+    };
 
-      for (const item of rawGroups || []) {
+    const aggregated = {}; // code -> totalValue (headline link width)
+    const perDetail = {};  // code -> { detailName: value }
+
+    // Headline totals from the clean enclosing boundary (matches the stack chart).
+    // For the all-LTKL view there's no single polygon, so aggregateGeometry is
+    // null and totals are accumulated from the per-kabupaten reductions below.
+    if (aggregateGeometry) {
+      for (const item of await reduceTransitions(aggregateGeometry)) {
         const code = Number(item.group);
         const value = Number(item.sum);
         if (value <= 0) continue;
         aggregated[code] = (aggregated[code] || 0) + value;
+      }
+    }
+
+    // Per sub-region breakdown (and, when aggregateGeometry is null, the totals).
+    for (const { key, collection } of regions) {
+      const rawGroups = await reduceTransitions(collection.geometry());
+      for (const item of rawGroups) {
+        const code = Number(item.group);
+        const value = Number(item.sum);
+        if (value <= 0) continue;
+        if (!aggregateGeometry) {
+          aggregated[code] = (aggregated[code] || 0) + value;
+        }
         if (detailsLabel) {
           if (!perDetail[code]) perDetail[code] = {};
           perDetail[code][key] = value;
@@ -418,30 +597,48 @@ router.get("/sankey-transition", async (req, res, next) => {
       }
     }
 
-    const startLabels = STACK_LABELS.map((label) => `${label} (${startYear})`);
-    const endLabels = STACK_LABELS.map((label) => `${label} (${endYear})`);
+    // Roll the Level-2 transition matrix up into the 5 Level-1 groups. Each
+    // group->group flow is the exact sum of its Level-2 children, and the
+    // per-region details are summed the same way so the tooltip breakdown stays
+    // consistent with the headline flow.
+    const groupAggregated = {}; // "startGroupKey>endGroupKey" -> value
+    const groupDetail = {};     // "startGroupKey>endGroupKey" -> { detailName: value }
+    for (const [code, value] of Object.entries(aggregated)) {
+      if (value <= 0) continue;
+      const startGroup = CLASS_TO_GROUP_KEY[Math.floor(Number(code) / 1000)];
+      const endGroup = CLASS_TO_GROUP_KEY[Number(code) % 1000];
+      if (!startGroup || !endGroup) continue;
+      const groupKey = `${startGroup}>${endGroup}`;
+      groupAggregated[groupKey] = (groupAggregated[groupKey] || 0) + value;
+      if (detailsLabel && perDetail[code]) {
+        if (!groupDetail[groupKey]) groupDetail[groupKey] = {};
+        for (const [detailName, detailValue] of Object.entries(perDetail[code])) {
+          groupDetail[groupKey][detailName] = (groupDetail[groupKey][detailName] || 0) + detailValue;
+        }
+      }
+    }
+
+    const startLabels = LEVEL1_LABELS.map((label) => `${label} (${startYear})`);
+    const endLabels = LEVEL1_LABELS.map((label) => `${label} (${endYear})`);
 
     const nodes = [...startLabels, ...endLabels].map((name, index) => ({
       name,
-      itemStyle: { color: STACK_COLORS[index % STACK_COLORS.length] },
+      itemStyle: { color: LEVEL1_COLORS[index % LEVEL1_COLORS.length] },
     }));
 
     const links = [];
-    for (const [code, value] of Object.entries(aggregated)) {
-      const startClass = Math.floor(Number(code) / 1000);
-      const endClass = Number(code) % 1000;
-
+    for (const [groupKey, value] of Object.entries(groupAggregated)) {
       if (value <= 0) continue;
-
-      const sourceIndex = stackKeysNumbers.indexOf(startClass);
-      const targetIndex = stackKeysNumbers.indexOf(endClass);
+      const [startGroup, endGroup] = groupKey.split(">");
+      const sourceIndex = LEVEL1_KEYS.indexOf(startGroup);
+      const targetIndex = LEVEL1_KEYS.indexOf(endGroup);
       if (sourceIndex === -1 || targetIndex === -1) continue;
 
       links.push({
         source: startLabels[sourceIndex],
         target: endLabels[targetIndex],
         value,
-        details: perDetail[code] || {},
+        details: groupDetail[groupKey] || {},
       });
     }
 
@@ -454,9 +651,9 @@ router.get("/sankey-transition", async (req, res, next) => {
       detailsLabel,
       nodes,
       links,
-      labels: STACK_LABELS,
-      colors: STACK_COLORS,
-      keys: STACK_KEYS,
+      labels: LEVEL1_LABELS,
+      colors: LEVEL1_COLORS,
+      keys: LEVEL1_KEYS,
     });
   } catch (err) {
     next(err);
