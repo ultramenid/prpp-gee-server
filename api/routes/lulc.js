@@ -16,12 +16,16 @@ const {
 // 13-class transition matrix up into the 5 Level-1 groups for the Sankey, so the
 // chart and tooltip show the Level-1 grouping while each group->group value stays
 // the exact sum of its Level-2 children.
-const CLASS_TO_GROUP_KEY = Object.fromEntries(
-  STACK_CLASSES.map((c) => [Number(c.key), c.grp])
-);
+const CLASS_TO_GROUP_KEY = STACK_CLASSES.reduce((map, c) => {
+  map[Number(c.key)] = c.grp;
+  return map;
+}, {});
 // Class key (string) -> full class descriptor, for building the 2-level coverage
 // hierarchy (Tingkat 1 group -> Tingkat 2 class) consumed by the sunburst chart.
-const STACK_CLASS_BY_KEY = Object.fromEntries(STACK_CLASSES.map((c) => [c.key, c]));
+const STACK_CLASS_BY_KEY = STACK_CLASSES.reduce((map, c) => {
+  map[c.key] = c;
+  return map;
+}, {});
 const LEVEL1_KEYS = LEVEL1_GROUPS.map((g) => g.key);
 const LEVEL1_LABELS = LEVEL1_GROUPS.map((g) => g.label);
 const LEVEL1_COLORS = LEVEL1_GROUPS.map((g) => g.color);
