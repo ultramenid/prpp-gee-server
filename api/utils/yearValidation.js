@@ -32,15 +32,4 @@ function parseYearRange(startValue, endValue, defaults = { start: 2013, end: 202
   return { startYear, endYear };
 }
 
-function parseYearList(value, defaultYears) {
-  if (value === undefined) return defaultYears;
-
-  const parts = String(value).split(",").map((part) => part.trim());
-  if (parts.length === 0 || parts.some((part) => !INTEGER_PATTERN.test(part))) {
-    throw badRequest("year must contain comma-separated integers");
-  }
-
-  return parts.map((part) => Number.parseInt(part, 10));
-}
-
-module.exports = { parseSingleYear, parseYearList, parseYearRange, MAPBIOMAS_MIN_YEAR, MAPBIOMAS_MAX_YEAR };
+module.exports = { parseSingleYear, parseYearRange, MAPBIOMAS_MIN_YEAR, MAPBIOMAS_MAX_YEAR };

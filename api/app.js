@@ -2,9 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { HttpError } = require("./utils/httpErrors");
 
-const mapidRouter = require("./routes/mapid");
 const lulcRouter = require("./routes/lulc");
-const classesRouter = require("./routes/classes");
 
 const app = express();
 
@@ -15,9 +13,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.use("/mapid", mapidRouter);
 app.use("/gee", lulcRouter);
-app.use("/gee", classesRouter);
 
 app.use((req, res, next) => {
   next(new HttpError(404, "Not found"));

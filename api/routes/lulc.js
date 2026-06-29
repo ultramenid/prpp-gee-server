@@ -3,14 +3,17 @@ const { ee } = require("../services/earthEngine");
 const {
   ASSETS,
   LTKL_KABUPATEN_LIST,
-  LULC_ORIGINAL_CLASSES,
-  LULC_REMAPPED_CLASSES,
   STACK_KEYS,
   STACK_LABELS,
   STACK_COLORS,
   STACK_CLASSES,
   LEVEL1_GROUPS,
 } = require("../config/assets");
+const {
+  assertDrillParams,
+  resolveDrillRegions,
+  evalGroupedReduce,
+} = require("../utils/drill");
 
 // Level-2 class id -> Level-1 group key (from STACK_CLASSES.grp). Used to roll the
 // 13-class transition matrix up into the 5 Level-1 groups for the Sankey, so the
@@ -29,7 +32,7 @@ const STACK_CLASS_BY_KEY = STACK_CLASSES.reduce((map, c) => {
 const LEVEL1_KEYS = LEVEL1_GROUPS.map((g) => g.key);
 const LEVEL1_LABELS = LEVEL1_GROUPS.map((g) => g.label);
 const LEVEL1_COLORS = LEVEL1_GROUPS.map((g) => g.color);
-const { parseSingleYear, parseYearList, parseYearRange } = require("../utils/yearValidation");
+const { parseSingleYear, parseYearRange } = require("../utils/yearValidation");
 
 const router = express.Router();
 
@@ -69,75 +72,6 @@ router.get("/lulc", async (req, res, next) => {
   }
 });
 
-router.get("/lulc-stats", async (req, res, next) => {
-  try {
-    const yearList = parseYearList(req.query.year, [2024]);
-    const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
-    const kabCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
-
-    let resultByYear = ee.Dictionary({});
-
-    for (const year of yearList) {
-      let allAreas = ee.Dictionary({});
-
-      for (const kabupaten of LTKL_KABUPATEN_LIST) {
-        const kabRegion = kabCollection.filter(ee.Filter.eq("kab", kabupaten));
-
-        const classifiedImage = mapbiomasImage
-          .select("classification_" + year)
-          .clip(kabRegion)
-          .remap(LULC_ORIGINAL_CLASSES, LULC_REMAPPED_CLASSES)
-          .rename(kabupaten);
-
-        const pixelAreaHectares = ee.Image.pixelArea().divide(1e4);
-
-        const areaByClass = pixelAreaHectares.addBands(classifiedImage).reduceRegion({
-          reducer: ee.Reducer.sum().group({ groupField: 1 }),
-          geometry: kabRegion.geometry(),
-          scale: 30,
-          maxPixels: 1e13,
-        });
-
-        const statsFormatted = ee.List(areaByClass.get("groups")).map(function (item) {
-          const entry = ee.Dictionary(item);
-          return [
-            ee.Number(entry.get("group")).format("%02d"),
-            ee.Number(entry.get("sum")).format("%.0f"),
-          ];
-        });
-
-        const statsDictionary = ee.Dictionary(statsFormatted.flatten());
-        const forestAreaHectares = ee.Number(statsDictionary.get("03", 0));
-        allAreas = allAreas.set(kabupaten, forestAreaHectares);
-      }
-
-      const kabFeatures = ee.FeatureCollection(
-        allAreas.keys().map(function (key) {
-          return ee.Feature(null, {
-            kab: key,
-            area: ee.Number(allAreas.get(key)),
-          });
-        })
-      );
-
-      const sortedFeatures = kabFeatures.sort("area", false);
-      const sortedList = sortedFeatures
-        .aggregate_array("kab")
-        .zip(sortedFeatures.aggregate_array("area"));
-
-      resultByYear = resultByYear.set(String(year), sortedList);
-    }
-
-    const result = await new Promise((resolve, reject) =>
-      resultByYear.evaluate((value, err) => (err ? reject(err) : resolve(value)))
-    );
-
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
 // Stacked Bar — land-cover composition as a YEAR SERIES (default 1990-2024).
 // Returns one row per year, each stack label carrying the ABSOLUTE area in
 // hectares for that year; `total_ha` is the sum across all classes (used for
@@ -155,66 +89,18 @@ router.get("/stack-chart", async (req, res, next) => {
       end: 2024,
     });
     const { kab, kec, des } = req.query;
-
-    // Validate hierarchy
-    if (des && !kec) {
-      return res.status(400).json({ error: "Parameter kec diperlukan ketika des diberikan." });
-    }
-    if (kec && !kab) {
-      return res.status(400).json({ error: "Parameter kab diperlukan ketika kec diberikan." });
-    }
-    if (kab && !LTKL_KABUPATEN_LIST.includes(kab)) {
-      return res.status(400).json({ error: `Kabupaten "${kab}" tidak ditemukan dalam daftar LTKL.` });
-    }
+    assertDrillParams(kab, kec, des);
 
     const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
-    const kabCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
-    const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
-    const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
+    const kabupatenCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
+    const kecamatanCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
+    const desaCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
-    // Resolve the drill level into a list of LEAF regions to sum over. Area by
-    // class is additive across disjoint regions, so we never union all 9
-    // kabupaten into one giant multipolygon (that reduceRegion times out).
-    // Instead each kabupaten is reduced separately (small, parallelizable
-    // geometry — like the Sankey loop) and the per-year areas are summed in
-    // Node. Kabupaten-level scopes use the clean kabupatenCollection boundary
-    // (avoids the sliver loss from dissolving kecamatan); finer scopes use
-    // kecamatan/desa.
-    let level;
-    let scope;
-    let leafRegions; // [{ key, collection }]
-
-    if (des) {
-      level = "desa";
-      scope = des;
-      leafRegions = [{
-        key: des,
-        collection: desCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec))
-          .filter(ee.Filter.eq("des", des)),
-      }];
-    } else if (kec) {
-      level = "kecamatan";
-      scope = kec;
-      leafRegions = [{
-        key: kec,
-        collection: kecCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec)),
-      }];
-    } else if (kab) {
-      level = "kabupaten";
-      scope = kab;
-      leafRegions = [{ key: kab, collection: kabCollection.filter(ee.Filter.eq("kab", kab)) }];
-    } else {
-      level = "ltkl";
-      scope = "Semua Kabupaten LTKL";
-      leafRegions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
-        key: kabupatenName,
-        collection: kabCollection.filter(ee.Filter.eq("kab", kabupatenName)),
-      }));
-    }
+    const { level, scope, leafRegions } = resolveDrillRegions(kab, kec, des, {
+      kabupatenCollection,
+      kecamatanCollection,
+      desaCollection,
+    });
 
     const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
 
@@ -322,60 +208,18 @@ router.get("/coverage-hierarchy", async (req, res, next) => {
   try {
     const year = parseSingleYear(req.query.year, 2024);
     const { kab, kec, des } = req.query;
-
-    if (des && !kec) {
-      return res.status(400).json({ error: "Parameter kec diperlukan ketika des diberikan." });
-    }
-    if (kec && !kab) {
-      return res.status(400).json({ error: "Parameter kab diperlukan ketika kec diberikan." });
-    }
-    if (kab && !LTKL_KABUPATEN_LIST.includes(kab)) {
-      return res.status(400).json({ error: `Kabupaten "${kab}" tidak ditemukan dalam daftar LTKL.` });
-    }
+    assertDrillParams(kab, kec, des);
 
     const mapbiomasImage = ee.Image(ASSETS.mapbiomasIndonesiaC41);
-    const kabCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
-    const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
-    const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
+    const kabupatenCollection = ee.FeatureCollection(ASSETS.kabupatenCollection);
+    const kecamatanCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
+    const desaCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
-    // Resolve the drill level into a list of LEAF regions to sum over — area by
-    // class is additive across disjoint regions, so each kabupaten is reduced
-    // separately (small, parallelizable geometry) rather than unioning all 9
-    // into one giant multipolygon. Kabupaten-level scopes use the clean
-    // kabupatenCollection boundary (avoids the sliver loss from dissolving
-    // kecamatan); finer scopes use kecamatan/desa.
-    let level;
-    let scope;
-    let leafRegions;
-
-    if (des) {
-      level = "desa";
-      scope = des;
-      leafRegions = [{
-        collection: desCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec))
-          .filter(ee.Filter.eq("des", des)),
-      }];
-    } else if (kec) {
-      level = "kecamatan";
-      scope = kec;
-      leafRegions = [{
-        collection: kecCollection
-          .filter(ee.Filter.eq("kab", kab))
-          .filter(ee.Filter.eq("kec", kec)),
-      }];
-    } else if (kab) {
-      level = "kabupaten";
-      scope = kab;
-      leafRegions = [{ collection: kabCollection.filter(ee.Filter.eq("kab", kab)) }];
-    } else {
-      level = "ltkl";
-      scope = "Semua Kabupaten LTKL";
-      leafRegions = LTKL_KABUPATEN_LIST.map((kabupatenName) => ({
-        collection: kabCollection.filter(ee.Filter.eq("kab", kabupatenName)),
-      }));
-    }
+    const { level, scope, leafRegions } = resolveDrillRegions(kab, kec, des, {
+      kabupatenCollection,
+      kecamatanCollection,
+      desaCollection,
+    });
 
     const pixelAreaHa = ee.Image.pixelArea().divide(1e4);
     const classImage = mapbiomasImage.select("classification_" + year).rename("class");
@@ -391,12 +235,7 @@ router.get("/coverage-hierarchy", async (req, res, next) => {
         maxPixels: 1e13,
         tileScale: 8,
       });
-      const groups = ee.List(
-        ee.Algorithms.If(areaByClass.contains("groups"), areaByClass.get("groups"), [])
-      );
-      return new Promise((resolve, reject) =>
-        groups.evaluate((value, err) => (err ? reject(err) : resolve(value || [])))
-      );
+      return evalGroupedReduce(areaByClass);
     };
 
     const MAX_CONCURRENCY = 8;
@@ -454,15 +293,7 @@ router.get("/sankey-transition", async (req, res, next) => {
     const kecCollection = ee.FeatureCollection(ASSETS.kecamatanCollection);
     const desCollection = ee.FeatureCollection(ASSETS.desaCollection);
 
-    if (des && !kec) {
-      return res.status(400).json({ error: "Parameter kec diperlukan ketika des diberikan." });
-    }
-    if (kec && !kab) {
-      return res.status(400).json({ error: "Parameter kab diperlukan ketika kec diberikan." });
-    }
-    if (kab && !LTKL_KABUPATEN_LIST.includes(kab)) {
-      return res.status(400).json({ error: `Kabupaten "${kab}" tidak ditemukan dalam daftar LTKL.` });
-    }
+    assertDrillParams(kab, kec, des);
 
     const stackKeysNumbers = STACK_KEYS.map(Number);
 
@@ -561,12 +392,7 @@ router.get("/sankey-transition", async (req, res, next) => {
         maxPixels: 1e13,
         tileScale: 8,
       });
-      const groups = ee.List(
-        ee.Algorithms.If(areaByTransition.contains("groups"), areaByTransition.get("groups"), [])
-      );
-      return new Promise((resolve, reject) =>
-        groups.evaluate((value, err) => (err ? reject(err) : resolve(value || [])))
-      );
+      return evalGroupedReduce(areaByTransition);
     };
 
     const aggregated = {}; // code -> totalValue (headline link width)

@@ -61,15 +61,6 @@ const LEVEL1_GROUPS = [
   { key: "L1_5", label: "Tubuh Air", color: "#2532e4", children: [31, 33] },
 ];
 
-// Level 2 — the 13 classes, derived from STACK_CLASSES so id/label/color/group
-// stay in sync with the single source above. `id` is the numeric class value.
-const LEVEL2_CLASSES = STACK_CLASSES.map((c) => ({
-  id: Number(c.key),
-  label: c.label,
-  color: c.color,
-  grp: c.grp,
-}));
-
 // Parallel arrays derived from STACK_CLASSES — kept for the JSON response shape
 // (ECharts) and index-based row building in the route layer.
 const STACK_KEYS = STACK_CLASSES.map((c) => c.key);
@@ -89,19 +80,12 @@ const LTKL_KABUPATEN_LIST = [
   "Sigi",
 ];
 
-// Remap forest-related LULC classes (3, 5, 76) to a single class (3) for area calculation
-const LULC_ORIGINAL_CLASSES = [3, 5, 76];
-const LULC_REMAPPED_CLASSES = [3, 3, 3];
-
 module.exports = {
   ASSETS,
   LTKL_KABUPATEN_LIST,
-  LULC_ORIGINAL_CLASSES,
-  LULC_REMAPPED_CLASSES,
   STACK_CLASSES,
   STACK_KEYS,
   STACK_LABELS,
   STACK_COLORS,
   LEVEL1_GROUPS,
-  LEVEL2_CLASSES,
 };
