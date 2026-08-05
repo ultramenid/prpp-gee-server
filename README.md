@@ -131,14 +131,42 @@ Returns a Sentinel-2 true-color mosaic tile URL (cloud-filtered, 2019–2020).
 
 ### `GET /gee/lulc`
 
-Returns a LULC map tile URL for a given year and optional region.
+Returns a LULC map tile URL (plain text) for a given year and optional region.
 
-| Query Param | Type   | Default | Description                    |
-| ----------- | ------ | ------- | ------------------------------ |
-| `year`      | number | `1992`  | LULC year                      |
-| `kab`       | string | —       | Filter by kabupaten (regency)  |
-| `kec`       | string | —       | Filter by kecamatan (district) |
-| `des`       | string | —       | Filter by desa (village)       |
+Tiles are rendered live from the MapBiomas Indonesia Collection 4.1 classification
+bands — the same asset the statistics endpoints reduce — so the map and the charts
+always show identical data. Class ids are remapped onto the 13 `STACK_CLASSES`
+colors; anything else (class `0` no-data, `27` unobserved) renders transparent.
+
+| Query Param | Type             | Default    | Description                          |
+| ----------- | ---------------- | ---------- | ------------------------------------ |
+| `year`      | number           | `1992`     | LULC year                            |
+| `kab`       | string           | —          | Filter by kabupaten (regency)        |
+| `kec`       | string           | —          | Filter by kecamatan (district)       |
+| `des`       | string           | —          | Filter by desa (village)             |
+| `classes`   | comma-separated  | all 13     | Render only these class ids          |
+
+Drill params follow the usual hierarchy: `des` requires `kec`, `kec` requires `kab`,
+and `kab` must be an LTKL kabupaten. With no params the tiles cover all 9 kabupaten.
+
+**Legend on/off — `classes`**
+
+A tile is baked pixels, so a class cannot be hidden client-side. Pass the classes
+that are still switched on and re-apply the returned tile URL; everything else
+renders transparent. Order and duplicates don't matter — colors stay bound to the
+class, never to its position in the query.
+
+```
+GET /gee/lulc?year=2024&kab=Siak&classes=3,5,76     # forest classes only
+GET /gee/lulc?year=2024&kab=Siak                    # all classes
+```
+
+Valid ids are the 13 in `STACK_CLASSES` (`api/config/assets.js`), which also carries
+their labels and colors: `3, 76, 5, 13, 21, 9, 35, 40, 25, 24, 30, 31, 33`. The same
+ids come back as `keys`/`labels`/`colors` on `GET /gee/stack-chart`, so a legend can
+be built without hardcoding them. An unknown id returns 400.
+An empty `classes=` also returns 400 — with nothing selected the client should remove
+the layer rather than request a blank tile.
 
 **Example:**
 
@@ -146,7 +174,11 @@ Returns a LULC map tile URL for a given year and optional region.
 GET /gee/lulc?year=2020&kab=Siak
 ```
 
-`year` must be an integer. The API does not enforce a fixed year range because new Earth Engine assets may be added over time.
+`year` must be an integer. The API does not enforce a fixed year range because new
+MapBiomas bands may be added over time (4.1 currently carries 1988–2024).
+
+Verify the rendering end to end with `node scripts/verify-lulc-tile.js` — it fetches
+a real tile and asserts every painted pixel is a palette-exact class color.
 
 ---
 

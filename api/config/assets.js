@@ -3,18 +3,16 @@ const ASSETS = {
   desaCollection: "projects/ee-dataaurigagee/assets/LTKL/desa",
   kecamatanCollection: "projects/ee-dataaurigagee/assets/LTKL/kecamatan",
   kabupatenCollection: "projects/ee-dataaurigagee/assets/LTKL/kabupaten",
-  lulcCollection: (year) =>
-    `projects/ee-dataaurigagee/assets/LTKL/LTKLcollection2/LTKL_mbi41_${year}`,
   // MapBiomas Indonesia Collection 4 — the version published on the public
   // MapBiomas platform. Kept for reference/verification only (its per-class
   // areas reproduce the platform's CSV exports — see scripts/verify-area.js),
   // NOT used by the live endpoints.
   mapbiomasIndonesia:
     "projects/mapbiomas-public/assets/indonesia/lulc/collection4/mapbiomas_indonesia_collection4_coverage_v2",
-  // MapBiomas Indonesia Collection 4.1 — the asset the precomputed /lulc map
-  // tiles (LTKL_mbi41_*) are derived from. ALL area statistics (stack-chart,
-  // lulc-stats, sankey-transition) use this so the charts stay consistent with
-  // the land-cover map shown on the site. Note: 4.1 reclassified a large amount
+  // MapBiomas Indonesia Collection 4.1 — the single source for everything: the
+  // /lulc map tiles and ALL area statistics (stack-chart, coverage-hierarchy,
+  // sankey-transition), so the map and the charts can never disagree.
+  // Note: 4.1 reclassified a large amount
   // of Non-Hutan (class 13) into Formasi Hutan (class 3) vs 4.0, so forest area
   // reads higher here than in the platform's Collection-4 CSV exports. Bands are
   // classification_1988..2024 (superset of Collection 4's 1990..2024).

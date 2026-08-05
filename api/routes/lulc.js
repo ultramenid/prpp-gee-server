@@ -33,6 +33,7 @@ const LEVEL1_KEYS = LEVEL1_GROUPS.map((g) => g.key);
 const LEVEL1_LABELS = LEVEL1_GROUPS.map((g) => g.label);
 const LEVEL1_COLORS = LEVEL1_GROUPS.map((g) => g.color);
 const { parseSingleYear, parseYearRange } = require("../utils/yearValidation");
+const { badRequest } = require("../utils/httpErrors");
 
 const router = express.Router();
 
@@ -53,19 +54,70 @@ async function runWithConcurrency(tasks, limit) {
   return results;
 }
 
+// Resolve the ?classes= filter into the class ids to render, in canonical
+// STACK_CLASSES order. Filtering STACK_KEYS by the request (rather than mapping
+// the request straight through) drops duplicates for free — ee.Image.remap
+// rejects a repeated `from` value — and keeps the palette aligned with the
+// remap indexes regardless of the order the caller listed them in.
+function parseClassFilter(rawClasses) {
+  if (rawClasses === undefined) return STACK_KEYS;
+
+  const requested = String(rawClasses)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  // An empty `classes=` is rejected rather than read as "all": with nothing
+  // selected the legend should drop the layer, not request a blank tile.
+  if (requested.length === 0) {
+    throw badRequest("classes must list at least one class id. Omit it entirely to render all classes.");
+  }
+
+  const unknown = requested.filter((value) => !STACK_KEYS.includes(value));
+  if (unknown.length > 0) {
+    throw badRequest(`Unknown class id: ${unknown.join(", ")}. Valid ids: ${STACK_KEYS.join(", ")}.`);
+  }
+
+  return STACK_KEYS.filter((key) => requested.includes(key));
+}
+
+// Land-cover map tiles for one year, clipped to the drill scope. Rendered live
+// from the MapBiomas Collection 4.1 classification bands — the same asset every
+// statistics endpoint reduces — instead of the pre-visualized LTKL_mbi41_* RGB
+// images, so the map and the charts always show the same data.
+//   (none)                            -> all 9 LTKL kabupaten
+//   ?kab=<name>                       -> that kabupaten
+//   ?kab=<name>&kec=<name>            -> that kecamatan
+//   ?kab=<name>&kec=<name>&des=<name> -> that desa
+// ?classes=3,5,76 renders only those classes, leaving the rest transparent. A
+// tile is baked pixels, so a legend toggle cannot hide a class client-side — it
+// re-requests the map id with the classes still switched on.
 router.get("/lulc", async (req, res, next) => {
   try {
     const { kab, kec, des } = req.query;
     const selectedYear = parseSingleYear(req.query.year, 1992);
+    const visibleClasses = parseClassFilter(req.query.classes);
+    assertDrillParams(kab, kec, des);
 
-    let regionCollection = ee.FeatureCollection(ASSETS.desaCollection);
-    if (kab) regionCollection = regionCollection.filter(ee.Filter.eq("kab", kab));
-    if (kec) regionCollection = regionCollection.filter(ee.Filter.eq("kec", kec));
-    if (des) regionCollection = regionCollection.filter(ee.Filter.eq("des", des));
+    const { leafRegions } = resolveDrillRegions(kab, kec, des, {
+      kabupatenCollection: ee.FeatureCollection(ASSETS.kabupatenCollection),
+      kecamatanCollection: ee.FeatureCollection(ASSETS.kecamatanCollection),
+      desaCollection: ee.FeatureCollection(ASSETS.desaCollection),
+    });
+    const regionCollection = ee.FeatureCollection(leafRegions.map((region) => region.collection)).flatten();
 
-    const lulcImage = ee.Image(ASSETS.lulcCollection(selectedYear)).clip(regionCollection);
+    // Remap the visible class ids onto contiguous 0..n-1 indexes so a positional
+    // palette can color them. Every id left out — the toggled-off classes plus
+    // 0 (no data) and 27 (unobserved) — falls out of the remap and renders
+    // transparent, so the basemap shows through.
+    const paletteColors = visibleClasses.map((key) => STACK_COLORS[STACK_KEYS.indexOf(key)]);
+    const tileImage = ee
+      .Image(ASSETS.mapbiomasIndonesiaC41)
+      .select("classification_" + selectedYear)
+      .remap(visibleClasses.map(Number), visibleClasses.map((_, index) => index))
+      .clipToCollection(regionCollection)
+      .visualize({ min: 0, max: Math.max(visibleClasses.length - 1, 1), palette: paletteColors });
 
-    const mapInfo = await lulcImage.getMap();
+    const mapInfo = await tileImage.getMap();
     res.send(mapInfo.urlFormat);
   } catch (err) {
     next(err);
